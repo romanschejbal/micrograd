@@ -1,16 +1,21 @@
-use std::cell::RefCell;
-use std::ops::{Add, Mul, Sub};
-use std::rc::Rc;
+use std::{
+    cell::RefCell,
+    ops::{Add, Div, Mul, Neg, Sub},
+    rc::Rc,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 enum Op {
     None,
     Add,
-    Sub,
     Mul,
+    Tanh,
+    Exp,
+    Pow,
 }
 
-type Children = (Rc<RefCell<Value>>, Rc<RefCell<Value>>);
+type SharedValue = Rc<RefCell<Value>>;
+type Children = (Option<SharedValue>, Option<SharedValue>);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Value {
@@ -43,35 +48,91 @@ impl Value {
         self.data
     }
 
-    pub fn children(&self) -> (Rc<RefCell<Value>>, Rc<RefCell<Value>>) {
-        self.children.clone().unwrap()
-    }
-
     pub fn backprop(&mut self) {
+        // let mut topo = vec![];
+        // fn build_topo(topo: &mut Vec<Rc<RefCell<Value>>>, parent: Rc<RefCell<Value>>) {
+        //     if let Some((ref a, ref b)) = parent.borrow().children {
+        //         a.as_ref()
+        //             .map(|children| build_topo(topo, Rc::clone(children)));
+        //         b.as_ref()
+        //             .map(|children| build_topo(topo, Rc::clone(children)));
+        //     }
+        //     topo.push(Rc::clone(&parent));
+        // }
+
+        // if let Some((ref a, ref b)) = self.children {
+        //     a.as_ref()
+        //         .map(|children| build_topo(&mut topo, Rc::clone(children)));
+        //     b.as_ref()
+        //         .map(|children| build_topo(&mut topo, Rc::clone(children)));
+        // }
+
         self.grad = 1.;
         self.backprop_internal();
+        // topo.iter()
+        //     .rev()
+        //     .for_each(|v| v.borrow_mut().backprop_internal());
     }
 
     fn backprop_internal(&mut self) {
-        if let Some((ref a, ref b)) = self.children {
+        println!("Backprop! {:?} {:?}", &self.op, self.data);
+        if let Some((Some(ref a), Some(ref b))) = self.children {
             match self.op {
+                Op::None => {}
                 Op::Add => {
                     a.borrow_mut().grad += self.grad;
                     b.borrow_mut().grad += self.grad;
                 }
-                Op::Sub => {
-                    a.borrow_mut().grad += self.grad;
-                    b.borrow_mut().grad -= self.grad;
-                }
                 Op::Mul => {
-                    a.borrow_mut().grad += self.grad * b.borrow().data();
-                    b.borrow_mut().grad += self.grad * a.borrow().data();
+                    a.borrow_mut().grad += self.grad * b.borrow().data;
+                    b.borrow_mut().grad += self.grad * a.borrow().data;
                 }
-                _ => {}
+                Op::Pow => {
+                    a.borrow_mut().grad +=
+                        b.borrow().data * (a.borrow().data.powf(b.borrow().data - 1.)) * self.grad;
+                }
+                _ => unreachable!(),
             }
             a.borrow_mut().backprop_internal();
             b.borrow_mut().backprop_internal();
+        } else if let Some((Some(ref a), None)) = self.children {
+            match self.op {
+                Op::Tanh => {
+                    a.borrow_mut().grad += (1. - self.data.powf(2.)) * self.grad;
+                }
+                Op::Exp => {
+                    a.borrow_mut().grad += self.data * self.grad;
+                }
+                _ => unreachable!(),
+            }
+            a.borrow_mut().backprop_internal();
         }
+    }
+
+    pub fn tanh(self) -> Self {
+        let x = self.data;
+        let t = (f32::EPSILON.powf(2. * x) - 1.) / (f32::EPSILON.powf(2. * x) + 1.);
+        Self::new_with_children(t, (Some(Rc::new(RefCell::new(self))), None), Op::Tanh)
+    }
+
+    pub fn exp(self) -> Self {
+        let x = self.data;
+        Self::new_with_children(
+            f32::EPSILON.powf(x),
+            (Some(Rc::new(RefCell::new(self))), None),
+            Op::Exp,
+        )
+    }
+
+    pub fn pow(self, exp: f32) -> Self {
+        Self::new_with_children(
+            self.data.powf(exp),
+            (
+                Some(Rc::new(RefCell::new(self))),
+                Some(Rc::new(RefCell::new(Value::new(exp)))),
+            ),
+            Op::Pow,
+        )
     }
 }
 
@@ -81,9 +142,44 @@ impl Add for Value {
     fn add(self, other: Value) -> Self {
         Self::new_with_children(
             self.data + other.data,
-            (Rc::new(RefCell::new(self)), Rc::new(RefCell::new(other))),
+            (
+                Some(Rc::new(RefCell::new(self))),
+                Some(Rc::new(RefCell::new(other))),
+            ),
             Op::Add,
         )
+    }
+}
+
+impl Add<f32> for Value {
+    type Output = Value;
+
+    fn add(self, other: f32) -> Self {
+        self.add(Value::new(other))
+    }
+}
+
+impl Add<Value> for f32 {
+    type Output = Value;
+
+    fn add(self, other: Value) -> Value {
+        Value::new(self).add(other)
+    }
+}
+
+impl Add<Value> for &mut Value {
+    type Output = Value;
+
+    fn add(self, rhs: Value) -> Self::Output {
+        self.add(rhs)
+    }
+}
+
+impl Neg for Value {
+    type Output = Value;
+
+    fn neg(self) -> Self {
+        self * -1.
     }
 }
 
@@ -91,11 +187,7 @@ impl Sub for Value {
     type Output = Value;
 
     fn sub(self, other: Value) -> Self {
-        Self::new_with_children(
-            self.data - other.data,
-            (Rc::new(RefCell::new(self)), Rc::new(RefCell::new(other))),
-            Op::Sub,
-        )
+        Self::add(self, -other)
     }
 }
 
@@ -105,9 +197,44 @@ impl Mul for Value {
     fn mul(self, other: Value) -> Self {
         Self::new_with_children(
             self.data * other.data,
-            (Rc::new(RefCell::new(self)), Rc::new(RefCell::new(other))),
+            (
+                Some(Rc::new(RefCell::new(self))),
+                Some(Rc::new(RefCell::new(other))),
+            ),
             Op::Mul,
         )
+    }
+}
+
+impl Mul<f32> for Value {
+    type Output = Value;
+
+    fn mul(self, other: f32) -> Self {
+        self.mul(Value::new(other))
+    }
+}
+
+impl Mul<Value> for f32 {
+    type Output = Value;
+
+    fn mul(self, other: Value) -> Value {
+        Value::new(self).mul(other)
+    }
+}
+
+impl Mul<&f32> for &mut Value {
+    type Output = Value;
+
+    fn mul(self, rhs: &f32) -> Self::Output {
+        self.mul(rhs)
+    }
+}
+
+impl Div for Value {
+    type Output = Value;
+
+    fn div(self, other: Self) -> Self::Output {
+        self * other.pow(-1.)
     }
 }
 
@@ -144,11 +271,12 @@ mod tests {
         let a = Value::new(-4.0);
         let b = Value::new(2.0);
         let c = a + b;
-        let mut d = c * Value::new(3.);
-        d.backprop();
-        let (c, e) = d.children();
-        assert_eq!(c.borrow().grad, 3.0);
-        assert_eq!(e.borrow().grad, -2.0);
-        dbg!(d);
+        let d = c * Value::new(1.);
+        // let e = d * Value::new(1.);
+
+        let mut o = d.tanh() * Value::new(5.);
+        o.backprop();
+
+        dbg!(o);
     }
 }
